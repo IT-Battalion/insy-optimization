@@ -10,6 +10,7 @@ import java.sql.*;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import org.postgresql.util.PSQLException;
 
 /**
  * INSY Webshop Server
@@ -246,36 +247,39 @@ public class Server {
 
             String response = "";
             int order_id = 1;
+            int productCount = 0;
             try {
+                conn.setAutoCommit(false);
                 Statement st1 = conn.createStatement();
+
+                st1.execute("LOCK TABLE orders IN SHARE ROW EXCLUSIVE MODE");
 
                 // Get the next free order id
                 ResultSet rs1 = st1.executeQuery("SELECT MAX(id)+1 from orders");
                 if (rs1.next())
                     order_id = rs1.getInt(1);
 
-                // Just to demonstrate a possible race condition
-                sleep(5);
-
                 // Create order
                 PreparedStatement st2 = conn.prepareStatement("INSERT INTO orders (id, client_id) VALUES (?,?)");
                 st2.setInt(1, order_id);
                 st2.setInt(2, client_id);
                 st2.executeUpdate();
+                conn.commit();
 
                 for (int i = 1; i <= (params.size()-1) / 2; ++i ){
+                    Statement st3 = conn.createStatement();
+                    st3.execute("LOCK TABLE articles IN ROW EXCLUSIVE MODE");
+
                     int article_id = Integer.parseInt(params.get("article_id_"+i));
                     int amount = Integer.parseInt(params.get("amount_"+i));
 
-                    PreparedStatement stGetAmount = conn.prepareStatement("SELECT amount FROM articles WHERE id = ?");
+                    PreparedStatement stGetAmount = conn.prepareStatement("SELECT amount FROM articles WHERE id = ? FOR UPDATE");
                     stGetAmount.setInt(1, article_id);
                     ResultSet rsAmount = stGetAmount.executeQuery();
                     if (!rsAmount.next())
                         throw new IllegalArgumentException("Article does not exist");
                     int available = rsAmount.getInt(1);
 
-                    // Simulate some slow task here like warehouse lookup for available items.
-                   sleep(5);
 
                     if (available < amount)
                         throw new IllegalArgumentException(String.format("Not enough items of article #%d available", article_id));
@@ -295,11 +299,36 @@ public class Server {
                     stInsert.setInt(2, article_id);
                     stInsert.setInt(3, amount);
                     stInsert.executeUpdate();
+                    conn.commit();
+                    productCount++;
                 }
 
+                if (productCount == 0) {
+                    PreparedStatement stUpdate = conn.prepareStatement("DELETE FROM orders WHERE id = ?");
+                    stUpdate.setInt(1, order_id);
+                    stUpdate.executeUpdate();
+                    conn.commit();
+                }
+
+                conn.commit();
                 response = String.format("{\"order_id\": %d}", order_id);
             } catch (SQLException throwables) {
                 throwables.printStackTrace();
+                try {
+                    conn.rollback();
+                } catch (SQLException ex) {
+                    ex.printStackTrace();
+                }
+                try {
+                    if  (productCount == 0) {
+                        conn.setAutoCommit(true);
+                        PreparedStatement stUpdate = conn.prepareStatement("DELETE FROM orders WHERE id = ?");
+                        stUpdate.setInt(1, order_id);
+                        stUpdate.executeUpdate();
+                    }
+                } catch (SQLException ex) {
+                    ex.printStackTrace();
+                }
             } catch (IllegalArgumentException iae) {
                 response = String.format("{\"error\":\"%s\"}", iae.getMessage());
             }
@@ -347,6 +376,8 @@ public class Server {
 
             Statement st = null;
             try {
+                conn.setAutoCommit(false);
+                conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
                 st = conn.createStatement();
 
                 // Get overview of orders by country
@@ -354,9 +385,6 @@ public class Server {
                         "FROM clients c, orders o " +
                         "WHERE c.id = o.client_id " +
                         "GROUP BY country"));
-
-                // Simulate some very complicated calculations here
-                sleep(15);
 
                 while (rs.next()) {
                     JSONObject c = new JSONObject();
@@ -383,6 +411,7 @@ public class Server {
                         orders.put(o);
                     }
                     res.put(country,orders);
+                    conn.commit(); // release the locks
                 }
 
             } catch (SQLException throwables) {
@@ -399,7 +428,6 @@ public class Server {
      * Helper function to send an answer given as a String back to the browser
      * @param t HttpExchange of the request
      * @param response Answer to send
-     * @throws IOException
      */
     private void answerRequest(HttpExchange t, String response) throws IOException {
         byte[] payload = response.getBytes();

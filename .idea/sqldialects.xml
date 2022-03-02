@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="SqlDialectMappings">
+    <file url="file://$PROJECT_DIR$/src/main/java/at/ac/tgm/insy/sem7/aufgabe2/pdamianik/Server.java" dialect="PostgreSQL" />
+    <file url="file://$PROJECT_DIR$/src/main/resources/webshop.sql" dialect="PostgreSQL" />
+    <file url="PROJECT" dialect="PostgreSQL" />
+  </component>
+</project>
